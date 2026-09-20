@@ -27,9 +27,9 @@ takes a couple of seconds and almost no disk space.
 ```
 Win11  (golden, stopped, snapshotted automatically when it changes)
   │
-  ├── vmclone add kundeA  ──►  Win11-kundeA   (running, own VPN session)
-  ├── vmclone add kundeB  ──►  Win11-kundeB   (running, own VPN session)
-  └── vmclone rm  kundeA  ──►  gone, deltas deleted
+  ├── vmclone add customerA  ──►  Win11-customerA   (running, own VPN session)
+  ├── vmclone add customerB  ──►  Win11-customerB   (running, own VPN session)
+  └── vmclone rm  customerA  ──►  gone, deltas deleted
 ```
 
 ## How it works
@@ -118,8 +118,8 @@ Defaults live at the top of the script and can be overridden per invocation:
 | `AUTO_PREFIX` | `vmclone-` | Name prefix for snapshots `vmclone` creates, and the only ones it deletes |
 
 ```sh
-GOLDEN=Win11-LTSC vmclone add kundeA      # snapshot handled automatically
-SNAP=24H2 vmclone add kundeA              # clone from that snapshot, whatever the golden looks like now
+GOLDEN=Win11-LTSC vmclone add customerA      # snapshot handled automatically
+SNAP=24H2 vmclone add customerA              # clone from that snapshot, whatever the golden looks like now
 ```
 
 Setting `SNAP` turns the automation off for that call: the named snapshot is
@@ -129,10 +129,10 @@ it is never garbage-collected.
 ## Usage
 
 ```sh
-vmclone add kundeA      # snapshot if needed, clone, boot   (~2 s + boot)
-vmclone add kundeB      # second, independent clone
-vmclone ls              # list golden VM and clones with status
-vmclone rm  kundeA      # hard power-off and delete, deltas included
+vmclone add customerA      # snapshot if needed, clone, boot   (~2 s + boot)
+vmclone add customerB      # second, independent clone
+vmclone ls                 # list golden VM and clones with status
+vmclone rm  customerA      # hard power-off and delete, deltas included
 ```
 
 `rm` uses `prlctl stop --kill`, i.e. a hard power-off — clones are disposable
@@ -156,9 +156,9 @@ see the caveats about machine SIDs.
 ### Keeping it current
 
 ```sh
-prlctl start Win11          # boot the golden VM
+prlctl start Win11             # boot the golden VM
 # patch, update tools, shut down cleanly
-vmclone add kundeA          # notices the golden VM ran, snapshots it, clones
+vmclone add customerA          # notices the golden VM ran, snapshots it, clones
 ```
 
 Snapshots made from an earlier golden state stay in place for as long as clones
