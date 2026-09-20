@@ -25,7 +25,7 @@ image's disk blocks read-only and writes only its own deltas, so creation
 takes a couple of seconds and almost no disk space.
 
 ```
-Win11  (golden, stopped, snapshot "base")
+Win11  (golden, stopped, snapshotted automatically when it changes)
   │
   ├── vmclone add kundeA  ──►  Win11-kundeA   (running, own VPN session)
   ├── vmclone add kundeB  ──►  Win11-kundeB   (running, own VPN session)
@@ -43,17 +43,47 @@ snapshot can run simultaneously**, and each one gets unique hardware IDs and a
 unique MAC address, so Windows and the guest network stack treat it as a
 separate machine.
 
-`vmclone` is a thin wrapper around three `prlctl` calls:
+`vmclone` is a thin wrapper around a handful of `prlctl` calls:
 
 | Subcommand | What it runs |
 |---|---|
-| `add` / `new` | `prlctl clone $GOLDEN --name $PREFIX-<tag> --linked --id <snapshot-uuid>` then `prlctl start` |
+| `add` / `new` | resolves a snapshot (see below), then `prlctl clone $GOLDEN --name $PREFIX-<tag> --linked --id <snapshot-uuid>` and `prlctl start` |
 | `rm` / `del` | `prlctl stop --kill` then `prlctl delete` |
 | `ls` | `prlctl list -a -o name,status`, filtered to `$PREFIX*` |
 
-The snapshot UUID is looked up by snapshot *name* (`$SNAP`) via
-`prlctl snapshot-list -j`, so refreshing the golden image does not mean
-editing UUIDs by hand.
+### Snapshots are handled for you
+
+You do not create or track snapshots by hand. On every `add`, `vmclone` checks
+whether the golden VM's current snapshot still holds its present state:
+
+* **It does** — the clone is made from that snapshot, whoever created it. No
+  new snapshot, nothing to clean up later.
+* **It does not** (you booted the golden to patch it) — `vmclone` takes a fresh
+  snapshot named `vmclone-<timestamp>` and clones from that.
+
+The check is exact rather than a guess about file timestamps. Parallels records
+the VM's cumulative uptime in its config, and every snapshot stores a copy of
+that config as it stood when the snapshot was taken. Equal uptime means the
+golden VM has not run since — so the snapshot still matches the disk.
+
+### Old snapshots are cleaned up
+
+After every `add` and `rm`, `vmclone` deletes the snapshots it created once
+nothing is linked to them any more. `prlctl snapshot-list -j` reports the
+dependent clones of each snapshot, so this is read from Parallels rather than
+inferred.
+
+Two rules keep it safe:
+
+* **Only snapshots named `vmclone-*` are ever deleted.** Anything you named
+  yourself is left alone, even when no clone uses it.
+* **The current snapshot is always kept**, because it is what the next `add`
+  would reuse.
+
+Parallels refuses to delete a snapshot while *any* linked clone of the golden
+VM is running, even a clone of some other snapshot. When that happens,
+`vmclone` says so and leaves the snapshots in place; the next `add` or `rm`
+with everything shut down sweeps them up.
 
 ## Prerequisites
 
@@ -62,9 +92,10 @@ editing UUIDs by hand.
   Edition feature, so verify it against your licence if you run Standard.
 * **`jq`** — `brew install jq`.
 * **bash** — the stock macOS `/bin/bash` 3.2 is fine.
-* A **golden VM** that is *shut down* and has a *named snapshot* (see below).
-  Linked clones cannot be made from Boot Camp VMs, encrypted VMs, or VMs with
-  Safe Mode enabled.
+* A **golden VM** that is *shut down*. It does not need a snapshot — `vmclone`
+  takes one when it needs one. Parallels cannot clone a running VM at all, so
+  `add` refuses until the golden VM is off. Linked clones cannot be made from
+  Boot Camp VMs, encrypted VMs, or VMs with Safe Mode enabled.
 * Enough **RAM** for the clones you want to run at once (4–6 GB per Windows 11
   guest), and enough disk for the golden image plus one delta per clone.
 
@@ -82,17 +113,23 @@ Defaults live at the top of the script and can be overridden per invocation:
 | Variable | Default | Meaning |
 |---|---|---|
 | `GOLDEN` | `Win11` | Name of the parent VM |
-| `SNAP` | `base` | Name of the snapshot to clone from |
 | `PREFIX` | `Win11` | Name prefix for clones (`$PREFIX-<tag>`) |
+| `SNAP` | *(unset)* | Pin to one existing snapshot by name. Unset means detect-or-create |
+| `AUTO_PREFIX` | `vmclone-` | Name prefix for snapshots `vmclone` creates, and the only ones it deletes |
 
 ```sh
-GOLDEN=Win11-LTSC SNAP=2026-09 vmclone add kundeA
+GOLDEN=Win11-LTSC vmclone add kundeA      # snapshot handled automatically
+SNAP=24H2 vmclone add kundeA              # clone from that snapshot, whatever the golden looks like now
 ```
+
+Setting `SNAP` turns the automation off for that call: the named snapshot is
+used as-is, none is created, and — unless it happens to be named `vmclone-*` —
+it is never garbage-collected.
 
 ## Usage
 
 ```sh
-vmclone add kundeA      # clone from the snapshot and boot it   (~2 s + boot)
+vmclone add kundeA      # snapshot if needed, clone, boot   (~2 s + boot)
 vmclone add kundeB      # second, independent clone
 vmclone ls              # list golden VM and clones with status
 vmclone rm  kundeA      # hard power-off and delete, deltas included
@@ -110,26 +147,22 @@ VM holding work you want to keep.
 3. Consider disabling automatic Windows Update **for the clones**, so a fresh
    clone does not spend its first ten minutes patching a disk it is about to
    throw away. Patching happens in the golden image instead.
-4. Shut the VM down cleanly. The snapshot must be taken while it is stopped.
-5. Take the snapshot:
+4. Shut the VM down cleanly. That is all — the first `vmclone add` takes the
+   snapshot it needs.
 
-   ```sh
-   prlctl snapshot Win11 --name base
-   ```
-
-Optionally `sysprep /generalize /oobe /shutdown` before step 5 — see the
-caveats about machine SIDs.
+Optionally `sysprep /generalize /oobe /shutdown` before the final shutdown —
+see the caveats about machine SIDs.
 
 ### Keeping it current
 
 ```sh
 prlctl start Win11          # boot the golden VM
 # patch, update tools, shut down cleanly
-prlctl snapshot Win11 --name 2026-10
-SNAP=2026-10 vmclone add kundeA
+vmclone add kundeA          # notices the golden VM ran, snapshots it, clones
 ```
 
-Old snapshots must stay in place as long as clones made from them exist.
+Snapshots made from an earlier golden state stay in place for as long as clones
+still use them, and are deleted once those clones are gone.
 
 ## Caveats
 
@@ -150,6 +183,18 @@ Old snapshots must stay in place as long as clones made from them exist.
   of `GOLDEN`. Set `PREFIX=work` if you would rather see only clones.
 * **Disk growth.** Deltas grow with everything the clone writes, Windows
   Update included. Disposing of clones regularly is what keeps this cheap.
+* **Cleanup needs everything shut down.** Parallels will not delete a snapshot
+  while any linked clone of the golden VM is running. If you always keep a
+  clone up, unused snapshots accumulate until you shut them all down.
+* **Deleting a snapshot merges its delta** into the next one in the chain. On a
+  large golden image that is minutes of disk I/O, and it happens inside the
+  `add` or `rm` that triggers the cleanup.
+* **Change detection keys on uptime.** Booting the golden VM marks it changed,
+  which is the point. Editing its config without booting — RAM, devices — does
+  not, so an existing snapshot is reused. Take a snapshot yourself, or set
+  `SNAP`, if such a change must reach the clones.
+* **Do not name your own snapshots `vmclone-*`.** That prefix marks a snapshot
+  as disposable, and cleanup will delete it once no clone depends on it.
 
 ## Alternatives
 

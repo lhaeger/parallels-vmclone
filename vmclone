@@ -1,27 +1,153 @@
 #!/usr/bin/env bash
 set -euo pipefail
 GOLDEN=${GOLDEN:-Win11}
-SNAP=${SNAP:-base}
 PREFIX=${PREFIX:-Win11}
+SNAP=${SNAP:-}
 
-snapid() {
-  prlctl snapshot-list "$GOLDEN" -j \
-    | jq -r --arg n "$SNAP" 'to_entries[]|select(.value.name==$n)|.key'
+# Snapshots whose name starts with this were created by vmclone, and are the
+# only ones it will ever delete. Anything you named yourself is off limits.
+AUTO_PREFIX=${AUTO_PREFIX:-vmclone-}
+
+die()  { echo "vmclone: $*" >&2; exit 1; }
+warn() { echo "vmclone: $*" >&2; }
+
+vm_exists() { prlctl list -i "$1" >/dev/null 2>&1; }
+
+vm_field() {
+  prlctl list -i "$1" -j 2>/dev/null | jq -r --arg f "$2" '.[0][$f] // empty'
 }
+
+# Empty for a VM without snapshots, which jq passes through as no output.
+snaps() { prlctl snapshot-list "$GOLDEN" -j 2>/dev/null; }
+
+snap_current() { snaps | jq -r 'to_entries[]|select(.value.current==true)|.key'; }
+
+snap_by_name() {
+  snaps | jq -r --arg n "$1" 'to_entries[]|select(.value.name==$n)|.key' | head -1
+}
+
+snap_name() { snaps | jq -r --arg k "$1" '.[$k].name // empty'; }
+
+# Parallels records the VM's cumulative uptime in its config, and each snapshot
+# keeps a copy of that config as it was when the snapshot was taken. Equal
+# uptime means the golden VM has not run since -- so the snapshot still holds
+# its current state and can be cloned again.
+config_uptime() {
+  local file=$1 start secs
+  [ -r "$file" ] || return 1
+  start=$(grep -oE '<VmUptimeStartDateTime>[^<]*' "$file" | head -1 | cut -d'>' -f2)
+  secs=$(grep -oE '<VmUptimeInSeconds>[0-9]+' "$file" | head -1 | cut -d'>' -f2)
+  [ -n "$secs" ] || return 1
+  echo "$start|$secs"
+}
+
+golden_unchanged_since() {
+  local home live snapped
+  home=$(vm_field "$GOLDEN" Home)
+  [ -n "$home" ] || return 1
+  live=$(config_uptime "$home/config.pvs") || return 1
+  snapped=$(config_uptime "$home/Snapshots/$1.pvc") || return 1
+  [ "$live" = "$snapped" ]
+}
+
+create_snapshot() {
+  local name id
+  name="$AUTO_PREFIX$(date +%Y%m%d-%H%M%S)"
+  # prlctl chatter must not end up in the caller's command substitution.
+  prlctl snapshot "$GOLDEN" --name "$name" \
+    --description "Created by vmclone to clone from." >&2
+  id=$(snap_by_name "$name")
+  [ -n "$id" ] || die "created snapshot '$name' but cannot find it again"
+  echo "$id"
+}
+
+# Echoes the id of the snapshot to clone from, creating one if needed.
+resolve_snapshot() {
+  local id state current
+  # Parallels refuses to clone a VM that is not shut down, whichever snapshot
+  # is named, so there is no point resolving one.
+  state=$(vm_field "$GOLDEN" State)
+  [ "$state" = "stopped" ] ||
+    die "$GOLDEN is $state; Parallels cannot clone it -- shut it down first"
+  if [ -n "$SNAP" ]; then
+    id=$(snap_by_name "$SNAP")
+    [ -n "$id" ] || die "$GOLDEN has no snapshot named '$SNAP'"
+    echo "$id"
+    return
+  fi
+  current=$(snap_current)
+  if [ -n "$current" ] && golden_unchanged_since "$current"; then
+    echo "$current"
+    return
+  fi
+  create_snapshot
+}
+
+# Parallels refuses to touch snapshots while any linked clone of the golden VM
+# is up -- including clones of an entirely different snapshot.
+clones_up() {
+  local linked running uuid
+  linked=$(snaps | jq -r '[to_entries[].value["linked clones"] // []]|flatten|.[]' | tr -d '{}')
+  [ -n "$linked" ] || return 1
+  running=$(prlctl list -a -j | jq -r '.[]|select(.status != "stopped")|.uuid')
+  for uuid in $linked; do
+    if printf '%s\n' "$running" | grep -qxF -- "$uuid"; then return 0; fi
+  done
+  return 1
+}
+
+# Deletes vmclone's own snapshots once nothing is linked to them. prlctl lists
+# the dependent clones per snapshot, so this never guesses. The current
+# snapshot is kept: it is what the next add would reuse.
+gc_snapshots() {
+  local orphans id name
+  orphans=$(snaps | jq -r --arg p "$AUTO_PREFIX" '
+    to_entries[]
+    | select(.value.current != true)
+    | select(.value.name | startswith($p))
+    | select(((.value["linked clones"]) // []) | length == 0)
+    | .key')
+  [ -n "$orphans" ] || return 0
+  if clones_up; then
+    warn "keeping $(printf '%s\n' "$orphans" | wc -l | tr -d ' ') unused snapshot(s);" \
+         "shut every clone of $GOLDEN down to reclaim them"
+    return 0
+  fi
+  for id in $orphans; do
+    name=$(snap_name "$id")
+    if prlctl snapshot-delete "$GOLDEN" --id "$id" >/dev/null; then
+      echo "vmclone: deleted unused snapshot '$name'"
+    else
+      warn "could not delete snapshot '$name'"
+    fi
+  done
+}
+
+require_golden() { vm_exists "$GOLDEN" || die "golden VM '$GOLDEN' not found"; }
 
 case "${1:-}" in
 add|new)
+       [ $# -ge 2 ] || die "usage: vmclone add <tag>"
+       require_golden
        vm="$PREFIX-$2"
-       prlctl clone "$GOLDEN" --name "$vm" --linked --id "$(snapid)"
+       if vm_exists "$vm"; then die "VM '$vm' already exists"; fi
+       snap_id=$(resolve_snapshot)
+       echo "vmclone: cloning $GOLDEN from snapshot '$(snap_name "$snap_id")'"
+       prlctl clone "$GOLDEN" --name "$vm" --linked --id "$snap_id"
        prlctl start "$vm"
+       gc_snapshots || warn "snapshot cleanup failed"
        # optional, costs one reboot: unique Windows hostname
        # prlctl exec "$vm" --current-user powershell -Command \
        #   "Rename-Computer -NewName '$vm' -Restart -Force"
        ;;
 rm|del)
+       [ $# -ge 2 ] || die "usage: vmclone rm <tag>"
+       require_golden
        vm="$PREFIX-$2"
+       if ! vm_exists "$vm"; then die "no such VM: $vm"; fi
        prlctl stop "$vm" --kill || true
        prlctl delete "$vm"
+       gc_snapshots || warn "snapshot cleanup failed"
        ;;
 ls)    prlctl list -a -o name,status | grep -E "^($PREFIX|NAME)" ;;
 *)     echo "usage: vmclone {add|rm|ls} <tag>"; exit 1 ;;
