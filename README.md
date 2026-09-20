@@ -132,7 +132,7 @@ Defaults live at the top of the script and can be overridden per invocation:
 | `PREFIX` | `Win11` | Name prefix for clones (`$PREFIX-<tag>`) |
 | `SNAP` | *(unset)* | Pin to one existing snapshot by name. Unset means detect-or-create |
 | `AUTO_PREFIX` | `vmclone-` | Name prefix for snapshots `vmclone` creates, and the only ones it deletes |
-| `VMSET` | *(unset)* | Default `prlctl set` options applied to every new clone, before any given on the command line |
+| `VMSET` | `--startup-view fullscreen --fullscreen-scale-view-mode keep-ratio` | `prlctl set` options applied to every new clone, before any given on the command line |
 
 ```sh
 GOLDEN=Win11-LTSC vmclone add customerA      # snapshot handled automatically
@@ -166,12 +166,21 @@ prlctl set fullscreen --help    # --fullscreen-use-all-displays, ...
 prlctl set memory --help        # --memsize
 ```
 
-`VMSET` holds the options you always want, so they need not be retyped:
+`VMSET` holds the options you always want, so they need not be retyped. Out of the
+box it brings every clone up full screen at the guest's own resolution:
+
+```sh
+VMSET="--startup-view fullscreen --fullscreen-scale-view-mode keep-ratio"
+```
+
+Setting it replaces that default rather than adding to it, so repeat the parts you
+want to keep:
 
 ```sh
 export VMSET="--startup-view fullscreen --cpus 4"
 vmclone add customerD --memsize 16384       # gets all three
 vmclone add customerE --cpus 8              # --cpus 8 wins over VMSET's 4
+VMSET= vmclone add customerF                # empty: no options at all
 ```
 
 Command-line options are appended after `$VMSET`, and `prlctl` applies repeated
@@ -274,12 +283,13 @@ still use them, and are deleted once those clones are gone.
   runtime between Parallels Tools and the Parallels window, and never stored in
   the VM config, so nothing `vmclone` forwards can pin it. (`--videosize` is
   video *memory*; `--high-resolution` and friends are HiDPI scaling switches.)
-  What you can set is how the clone presents itself: `--startup-view fullscreen`
-  brings it up full screen, and `--fullscreen-scale-view-mode auto` tells it to
-  follow that display's resolution instead of scaling a fixed mode into it. With
-  Parallels Tools installed — which the setup above already requires — the guest
-  then resizes itself to whatever Mac you are sitting at, which is the practical
-  equivalent. An exact pixel size has to be set inside the guest, e.g. through
+  What you can set is how the clone presents itself, which is what the default
+  `VMSET` does: `--startup-view fullscreen` brings it up full screen, and
+  `--fullscreen-scale-view-mode keep-ratio` leaves the guest's own resolution
+  alone and scales the picture to the display, preserving the aspect ratio. Use
+  `auto` instead if you would rather the guest resize itself to match the Mac
+  you are sitting at — that needs Parallels Tools, which the setup above already
+  requires. An exact pixel size has to be set inside the guest, e.g. through
   `prlctl exec`.
 
 ## Alternatives

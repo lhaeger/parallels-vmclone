@@ -6,7 +6,8 @@ SNAP=${SNAP:-}
 
 # Default `prlctl set` options applied to every new clone, before any given on
 # the command line. Split on whitespace, so values cannot contain spaces.
-VMSET=${VMSET:-}
+# Setting VMSET to the empty string applies none of them.
+VMSET=${VMSET- --startup-view fullscreen --fullscreen-scale-view-mode keep-ratio}
 
 # Snapshots whose name starts with this were created by vmclone, and are the
 # only ones it will ever delete. Anything you named yourself is off limits.
