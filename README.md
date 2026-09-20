@@ -47,7 +47,7 @@ separate machine.
 
 | Subcommand | What it runs |
 |---|---|
-| `add` / `new` | resolves a snapshot (see below), then `prlctl clone $GOLDEN --name $PREFIX-<tag> --linked --id <snapshot-uuid>` and `prlctl start` |
+| `add` / `new` | resolves a snapshot (see below), then `prlctl clone $GOLDEN --name $PREFIX-<tag> --linked --id <snapshot-uuid>`, `prlctl set $PREFIX-<tag> $VMSET <your options>` if any were given, and `prlctl start` |
 | `rm` / `del` | `prlctl stop --kill` then `prlctl delete` |
 | `ls` | `prlctl list -a -o name,status`, filtered to `$PREFIX*` |
 
@@ -116,6 +116,7 @@ Defaults live at the top of the script and can be overridden per invocation:
 | `PREFIX` | `Win11` | Name prefix for clones (`$PREFIX-<tag>`) |
 | `SNAP` | *(unset)* | Pin to one existing snapshot by name. Unset means detect-or-create |
 | `AUTO_PREFIX` | `vmclone-` | Name prefix for snapshots `vmclone` creates, and the only ones it deletes |
+| `VMSET` | *(unset)* | Default `prlctl set` options applied to every new clone, before any given on the command line |
 
 ```sh
 GOLDEN=Win11-LTSC vmclone add customerA      # snapshot handled automatically
@@ -126,11 +127,46 @@ Setting `SNAP` turns the automation off for that call: the named snapshot is
 used as-is, none is created, and — unless it happens to be named `vmclone-*` —
 it is never garbage-collected.
 
+### Configuring the clone
+
+Anything after the tag is handed to `prlctl set` verbatim, in one call, while
+the clone is stopped and before it boots. `vmclone` does not know or check what
+the options mean: whatever `prlctl set` accepts on your Parallels version works,
+including options added after this script was written.
+
+```sh
+vmclone add customerA --memsize 16384 --cpus 4
+vmclone add customerB --startup-view fullscreen --fullscreen-scale-view-mode auto
+vmclone add customerC -- --memsize 8192     # a lone -- is accepted and dropped
+```
+
+`prlctl set <category> --help` is the reference — note that the *category* name
+goes where the VM name normally goes:
+
+```sh
+prlctl set --help               # lists the categories
+prlctl set startup --help       # --startup-view, --autostart, --on-window-close, ...
+prlctl set fullscreen --help    # --fullscreen-use-all-displays, ...
+prlctl set memory --help        # --memsize
+```
+
+`VMSET` holds the options you always want, so they need not be retyped:
+
+```sh
+export VMSET="--startup-view fullscreen --cpus 4"
+vmclone add customerD --memsize 16384       # gets all three
+vmclone add customerE --cpus 8              # --cpus 8 wins over VMSET's 4
+```
+
+Command-line options are appended after `$VMSET`, and `prlctl` applies repeated
+options last-to-win, so the command line overrides the default.
+
 ## Usage
 
 ```sh
 vmclone add customerA      # snapshot if needed, clone, boot   (~2 s + boot)
 vmclone add customerB      # second, independent clone
+vmclone add customerC --memsize 16384   # any prlctl set option, applied before boot
 vmclone ls                 # list golden VM and clones with status
 vmclone rm  customerA      # hard power-off and delete, deltas included
 ```
@@ -195,6 +231,40 @@ still use them, and are deleted once those clones are gone.
   `SNAP`, if such a change must reach the clones.
 * **Do not name your own snapshots `vmclone-*`.** That prefix marks a snapshot
   as disposable, and cleanup will delete it once no clone depends on it.
+* **Clone options are applied while the clone is stopped**, between the clone
+  and the boot. That is what lets `--memsize` and friends take effect without a
+  restart, but options that need a *running* VM — `--device-connect`,
+  `--device-disconnect` — will fail there. Run those with `prlctl` yourself once
+  the clone is up.
+* **A failed `prlctl set` deletes the clone.** Apart from `rm`, this is the only
+  place `vmclone` deletes a VM: if any forwarded option is rejected, the
+  just-created clone is removed and `add` exits non-zero, so you never keep a
+  half-configured machine. The snapshot the `add` may have taken does stay
+  behind — it is the current one, and the next `add` reuses it. A failed
+  `prlctl start` is different: that clone is configured and kept, so you can
+  retry the start.
+* **`VMSET` is split on whitespace, with no quoting.** Values containing spaces
+  cannot be expressed there; pass those on the command line, where your shell
+  quotes them. `~` is not expanded either, so write
+  `export VMSET="--shf-host-add p --path $HOME/docs"` in double quotes if you
+  need a home-relative path.
+* **Forwarded options are not validated.** A typo is caught by `prlctl`, not by
+  `vmclone`, and only after the clone exists — costing a clone-and-delete round
+  trip of a few seconds rather than an instant rejection. `--name` is the one
+  exception: it is refused up front, because renaming a clone would hide it from
+  `rm`, `ls` and snapshot cleanup while it still pins its snapshot.
+* **Screen resolution is not a `prlctl` setting.** No `prlctl set` category has
+  an option for the guest's display resolution — the mode is negotiated at
+  runtime between Parallels Tools and the Parallels window, and never stored in
+  the VM config, so nothing `vmclone` forwards can pin it. (`--videosize` is
+  video *memory*; `--high-resolution` and friends are HiDPI scaling switches.)
+  What you can set is how the clone presents itself: `--startup-view fullscreen`
+  brings it up full screen, and `--fullscreen-scale-view-mode auto` tells it to
+  follow that display's resolution instead of scaling a fixed mode into it. With
+  Parallels Tools installed — which the setup above already requires — the guest
+  then resizes itself to whatever Mac you are sitting at, which is the practical
+  equivalent. An exact pixel size has to be set inside the guest, e.g. through
+  `prlctl exec`.
 
 ## Alternatives
 

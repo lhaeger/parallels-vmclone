@@ -4,6 +4,10 @@ GOLDEN=${GOLDEN:-Win11}
 PREFIX=${PREFIX:-Win11}
 SNAP=${SNAP:-}
 
+# Default `prlctl set` options applied to every new clone, before any given on
+# the command line. Split on whitespace, so values cannot contain spaces.
+VMSET=${VMSET:-}
+
 # Snapshots whose name starts with this were created by vmclone, and are the
 # only ones it will ever delete. Anything you named yourself is off limits.
 AUTO_PREFIX=${AUTO_PREFIX:-vmclone-}
@@ -127,13 +131,42 @@ require_golden() { vm_exists "$GOLDEN" || die "golden VM '$GOLDEN' not found"; }
 
 case "${1:-}" in
 add|new)
-       [ $# -ge 2 ] || die "usage: vmclone add <tag>"
+       [ $# -ge 2 ] || die "usage: vmclone add <tag> [prlctl set options]"
        require_golden
-       vm="$PREFIX-$2"
+       tag=$2
+       vm="$PREFIX-$tag"
        if vm_exists "$vm"; then die "VM '$vm' already exists"; fi
+
+       # Everything after the tag goes to `prlctl set` verbatim; a lone `--`
+       # separator is accepted and dropped. $VMSET goes first, so options on
+       # the command line override it.
+       shift 2
+       if [ "${1:-}" = "--" ]; then shift; fi
+       set -f                     # no globbing while $VMSET is word-split
+       # shellcheck disable=SC2086
+       set -- $VMSET "$@"
+       set +f
+       for opt in "$@"; do
+         # Renaming the clone would hide it from `rm`, `ls` and snapshot GC.
+         if [ "$opt" = "--name" ]; then
+           die "refusing --name: clones must stay called $PREFIX-<tag>"
+         fi
+       done
+
        snap_id=$(resolve_snapshot)
        echo "vmclone: cloning $GOLDEN from snapshot '$(snap_name "$snap_id")'"
        prlctl clone "$GOLDEN" --name "$vm" --linked --id "$snap_id"
+       if [ $# -gt 0 ]; then
+         echo "vmclone: configuring $vm: $*"
+         if ! prlctl set "$vm" "$@"; then
+           warn "prlctl set failed -- deleting $vm, nothing half-configured is left"
+           if ! prlctl delete "$vm"; then
+             warn "could not delete $vm; remove it with: vmclone rm $tag"
+           fi
+           gc_snapshots || warn "snapshot cleanup failed"
+           die "aborted: $vm was not started"
+         fi
+       fi
        prlctl start "$vm"
        gc_snapshots || warn "snapshot cleanup failed"
        # optional, costs one reboot: unique Windows hostname
@@ -150,5 +183,5 @@ rm|del)
        gc_snapshots || warn "snapshot cleanup failed"
        ;;
 ls)    prlctl list -a -o name,status | grep -E "^($PREFIX|NAME)" ;;
-*)     echo "usage: vmclone {add|rm|ls} <tag>"; exit 1 ;;
+*)     echo "usage: vmclone {add <tag> [prlctl set options]|rm <tag>|ls}"; exit 1 ;;
 esac
