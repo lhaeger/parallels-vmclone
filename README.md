@@ -101,10 +101,26 @@ with everything shut down sweeps them up.
 
 ## Install
 
+`vmclone` is a single self-contained script with no build step. Get a copy and put
+it somewhere on your `PATH`, executable. How you do that is up to you.
+
+Copy it into a system-wide directory:
+
 ```sh
 git clone https://github.com/lhaeger/parallels-vmclone.git
 install -m 755 parallels-vmclone/vmclone /usr/local/bin/vmclone
 ```
+
+Or symlink it into a personal one, so `git pull` updates the installed command:
+
+```sh
+git clone https://github.com/lhaeger/parallels-vmclone.git ~/src/parallels-vmclone
+mkdir -p ~/.local/bin
+ln -s ~/src/parallels-vmclone/vmclone ~/.local/bin/vmclone
+```
+
+`~/.local/bin` is not on the default macOS `PATH`; add it in your shell profile if it
+is not there already.
 
 ## Configuration
 
