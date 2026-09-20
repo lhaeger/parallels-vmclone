@@ -2,7 +2,7 @@
 set -euo pipefail
 GOLDEN=${GOLDEN:-Win11}
 SNAP=${SNAP:-base}
-PREFIX=Win11
+PREFIX=${PREFIX:-Win11}
 
 snapid() {
   prlctl snapshot-list "$GOLDEN" -j \
