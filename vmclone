@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+GOLDEN=${GOLDEN:-Win11}
+SNAP=${SNAP:-base}
+PREFIX=Win11
+
+snapid() {
+  prlctl snapshot-list "$GOLDEN" -j \
+    | jq -r --arg n "$SNAP" 'to_entries[]|select(.value.name==$n)|.key'
+}
+
+case "${1:-}" in
+add|new)
+       vm="$PREFIX-$2"
+       prlctl clone "$GOLDEN" --name "$vm" --linked --id "$(snapid)"
+       prlctl start "$vm"
+       # optional, costs one reboot: unique Windows hostname
+       # prlctl exec "$vm" --current-user powershell -Command \
+       #   "Rename-Computer -NewName '$vm' -Restart -Force"
+       ;;
+rm|del)
+       vm="$PREFIX-$2"
+       prlctl stop "$vm" --kill || true
+       prlctl delete "$vm"
+       ;;
+ls)    prlctl list -a -o name,status | grep -E "^($PREFIX|NAME)" ;;
+*)     echo "usage: vmclone {add|rm|ls} <tag>"; exit 1 ;;
+esac
