@@ -47,7 +47,7 @@ separate machine.
 
 | Subcommand | What it runs |
 |---|---|
-| `add` / `new` | resolves a snapshot (see below), then `prlctl clone $GOLDEN --name $PREFIX-<tag> --linked --id <snapshot-uuid>`, `prlctl set $PREFIX-<tag> $VMSET <your options>` if any were given, and `prlctl start` |
+| `add` / `new` | resolves a snapshot (see below), then `prlctl clone $GOLDEN --name $PREFIX-<tag> --linked --id <snapshot-uuid>`, `prlctl set $PREFIX-<tag> $VMSET <your options>` if any were given, `prlctl start`, and finally paints the clone's Windows accent colour |
 | `rm` / `del` | `prlctl stop --kill` then `prlctl delete` |
 | `ls` | `prlctl list -a -o name,status`, filtered to `$PREFIX*` |
 
@@ -186,12 +186,43 @@ VMSET= vmclone add customerF                # empty: no options at all
 Command-line options are appended after `$VMSET`, and `prlctl` applies repeated
 options last-to-win, so the command line overrides the default.
 
+### Telling clones apart
+
+Full screen, a Windows clone has no title bar and every one of them looks the
+same. So each clone gets its own **accent colour**, which tints the taskbar —
+the one piece of chrome that is always on screen.
+
+The colour follows the tag, so a customer keeps the same colour from session to
+session, without a lookup table anywhere. There are twelve hues 30 degrees
+apart, which means two clones are either the same colour or obviously
+different, never almost alike. When a clone already on the machine holds the
+colour a tag wants, the next free one is used instead, so no two clones running
+at once look the same. The colour is recorded in the VM's description, which is
+how the next `add` knows what is taken.
+
+Override it per clone with `--color`, which takes six hex digits, with or
+without a leading `#`:
+
+```sh
+vmclone add customerA --color 3366cc
+vmclone add customerB --color '#ff8800' --memsize 16384
+```
+
+`--color` is vmclone's own option: it is taken out of the arguments before the
+rest are handed to `prlctl set`.
+
+Painting happens once the clone has booted, over `prlctl exec`, and needs
+Parallels Tools plus a logged-in Windows session — nothing has to be prepared
+in the golden image. If the clone is not reachable, `add` says so and carries
+on: the clone is up and usable, just in the default colour.
+
 ## Usage
 
 ```sh
 vmclone add customerA      # snapshot if needed, clone, boot   (~2 s + boot)
 vmclone add customerB      # second, independent clone
 vmclone add customerC --memsize 16384   # any prlctl set option, applied before boot
+vmclone add customerD --color 3366cc    # pick the accent colour yourself
 vmclone ls                 # list golden VM and clones with status
 vmclone rm  customerA      # hard power-off and delete, deltas included
 ```
@@ -278,6 +309,20 @@ still use them, and are deleted once those clones are gone.
   trip of a few seconds rather than an instant rejection. `--name` is the one
   exception: it is refused up front, because renaming a clone would hide it from
   `rm`, `ls` and snapshot cleanup while it still pins its snapshot.
+* **Painting the accent colour restarts Explorer.** Windows only re-reads the
+  accent palette when the shell restarts, so `add` kills `explorer.exe` and
+  starts it again a few seconds into the clone's life. Any Explorer window open
+  at that moment closes. Apps are untouched.
+* **The colour needs a logged-in Windows session.** It goes in over
+  `prlctl exec`, so a clone sitting at the login screen keeps the default
+  colour and `add` warns. Log in and create the clone again, or set the accent
+  by hand in Settings.
+* **Only twelve colours exist.** Run more than twelve clones of one golden at
+  once and they start repeating. `--color` settles any pair you care about.
+* **`add` turns idle-pausing off while it paints**, then puts it back exactly
+  as the golden has it. A clone that paused itself mid-way would otherwise
+  strand the colour step — which is also worth knowing if you script anything
+  else against a fresh clone.
 * **Screen resolution is not a `prlctl` setting.** No `prlctl set` category has
   an option for the guest's display resolution — the mode is negotiated at
   runtime between Parallels Tools and the Parallels window, and never stored in

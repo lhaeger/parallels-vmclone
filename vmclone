@@ -13,6 +13,11 @@ VMSET=${VMSET- --startup-view fullscreen --fullscreen-scale-view-mode keep-ratio
 # only ones it will ever delete. Anything you named yourself is off limits.
 AUTO_PREFIX=${AUTO_PREFIX:-vmclone-}
 
+# Clones all look alike from inside a full-screen Windows session, so each one
+# gets its own accent colour. Twelve hues, 30 degrees apart: two clones are
+# either the same colour or obviously different, never almost alike.
+COLOR_SLOTS=12
+
 die()  { echo "vmclone: $*" >&2; exit 1; }
 warn() { echo "vmclone: $*" >&2; }
 
@@ -130,9 +135,151 @@ gc_snapshots() {
 
 require_golden() { vm_exists "$GOLDEN" || die "golden VM '$GOLDEN' not found"; }
 
+# Hue (0-359) to RRGGBB at a fixed saturation and lightness, so every slot
+# stays legible behind the white text Windows puts on the taskbar.
+hue_to_hex() {
+  awk -v h="$1" 'BEGIN {
+    s = 0.70; l = 0.45
+    c = (1 - (2*l > 1 ? 2*l - 1 : 1 - 2*l)) * s
+    hp = h / 60; sect = int(hp); f = hp - sect
+    x = c * (1 - (sect % 2 ? f : 1 - f))
+    m = l - c/2
+    if      (sect == 0) { r=c; g=x; b=0 }
+    else if (sect == 1) { r=x; g=c; b=0 }
+    else if (sect == 2) { r=0; g=c; b=x }
+    else if (sect == 3) { r=0; g=x; b=c }
+    else if (sect == 4) { r=x; g=0; b=c }
+    else                { r=c; g=0; b=x }
+    printf "%02X%02X%02X\n", (r+m)*255+0.5, (g+m)*255+0.5, (b+m)*255+0.5
+  }'
+}
+
+slot_hex() { hue_to_hex $(( $1 * (360 / COLOR_SLOTS) )); }
+
+# The slot a tag prefers. Same tag, same slot, on every machine and every run.
+tag_slot() {
+  local h
+  h=$(printf '%s' "$1" | md5 -q | cut -c1-6)
+  echo $(( 16#$h % COLOR_SLOTS ))
+}
+
+# The colour vmclone recorded on a VM, empty when it has none.
+vm_color() {
+  vm_field "$1" Description \
+    | sed -n 's/^vmclone:color=\([0-9A-Fa-f]\{6\}\)$/\1/p' | head -1
+}
+
+# Colours already spoken for by other clones of this golden.
+taken_colors() {
+  local vm
+  for vm in $(prlctl list -a -o name 2>/dev/null | tail -n +2 | grep "^$PREFIX-" || true); do
+    vm_color "$vm"
+  done
+}
+
+# The tag's own colour when it is free, otherwise the next free one, so no two
+# clones present alike. Falls back to the tag's own once all slots are in use.
+pick_color() {
+  local taken start i slot hex
+  taken=$(taken_colors)
+  start=$(tag_slot "$1")
+  i=0
+  while [ $i -lt $COLOR_SLOTS ]; do
+    slot=$(( (start + i) % COLOR_SLOTS ))
+    hex=$(slot_hex "$slot")
+    if ! printf '%s\n' "$taken" | grep -qx "$hex"; then
+      echo "$hex"
+      return
+    fi
+    i=$(( i + 1 ))
+  done
+  slot_hex "$start"
+}
+
+# Windows takes the taskbar tint from AccentPalette, a light-to-dark ramp of
+# eight RRGGBB00 entries with the accent itself at index 3 -- setting only
+# ColorizationColor leaves the taskbar on the previous colour. The ramp is
+# built by mixing the colour with white and black so any hex works, not just
+# the ones vmclone picks itself.
+accent_registry() {
+  local hex=$1 r g b
+  # Stock awk on macOS has no strtonum, so the hex is unpacked by the shell.
+  r=$(( 16#${hex:0:2} )); g=$(( 16#${hex:2:2} )); b=$(( 16#${hex:4:2} ))
+  awk -v r="$r" -v g="$g" -v b="$b" 'BEGIN {
+    split("0.65 0.40 0.18 0 -0.15 -0.35 -0.55", mix, " ")
+    pal = ""
+    for (i = 1; i <= 7; i++) {
+      m = mix[i]
+      t = m > 0 ? 255 : 0
+      w = m > 0 ? m : -m
+      rr = r + (t - r) * w; gg = g + (t - g) * w; bb = b + (t - b) * w
+      pal = pal sprintf("%02X%02X%02X00", rr, gg, bb)
+      if (i == 4) { m4r = rr; m4g = gg; m4b = bb }
+      if (i == 5) { m5r = rr; m5g = gg; m5b = bb }
+    }
+    pal = pal sprintf("%02X%02X%02X00", 255-r, 255-g, 255-b)   # index 7: contrast
+    printf "PALETTE=%s\n", pal
+    printf "ARGB=FF%02X%02X%02X\n", r, g, b
+    printf "ABGR=FF%02X%02X%02X\n", b, g, r
+    printf "MENU=FF%02X%02X%02X\n",  m4b, m4g, m4r
+    printf "START=FF%02X%02X%02X\n", m5b, m5g, m5r
+  }'
+}
+
+# Whether a VM pauses itself when idle. The clone inherits this from the
+# golden, and a pause part-way through the colour step would strand it.
+pause_idle_of() {
+  prlctl list -i "$1" -j 2>/dev/null \
+    | jq -r '.[]["Startup and Shutdown"]["Pause idle"] // empty' | head -1
+}
+
+# Paints the clone's taskbar. Needs a logged-in Windows session, so it is
+# best-effort: a clone nobody has logged into yet simply keeps the default.
+apply_color() {
+  local vm=$1 hex=$2 i K reg
+  eval "$(accent_registry "$hex")"
+  K='HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Accent'
+  i=0
+  while [ $i -lt 18 ]; do
+    if prlctl exec "$vm" --current-user cmd /c exit >/dev/null 2>&1; then
+      reg="reg add \"HKCU\\Software\\Microsoft\\Windows\\DWM\" /v ColorizationColor /t REG_DWORD /d 0x$ARGB /f"
+      reg="$reg & reg add \"HKCU\\Software\\Microsoft\\Windows\\DWM\" /v AccentColor /t REG_DWORD /d 0x$ABGR /f"
+      reg="$reg & reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\" /v ColorPrevalence /t REG_DWORD /d 1 /f"
+      reg="$reg & reg add \"$K\" /v AccentPalette /t REG_BINARY /d $PALETTE /f"
+      reg="$reg & reg add \"$K\" /v AccentColorMenu /t REG_DWORD /d 0x$MENU /f"
+      reg="$reg & reg add \"$K\" /v StartColorMenu /t REG_DWORD /d 0x$START /f"
+      # Explorer only re-reads the palette when it restarts, and Windows does
+      # not bring it back by itself after a taskkill.
+      reg="$reg & taskkill /f /im explorer.exe"
+      prlctl exec "$vm" --current-user cmd /c "$reg" >/dev/null 2>&1 || return 1
+      # Started from its own call, and via Start-Process: a shell launched with
+      # `start` inherits the console handles and never lets `prlctl exec` return.
+      prlctl exec "$vm" --current-user \
+        powershell -Command "Start-Process explorer.exe" >/dev/null 2>&1 || return 1
+      return 0
+    fi
+    i=$(( i + 1 ))
+    sleep 5
+  done
+  return 1
+}
+
+# Records the colour on the VM so later clones can see the slot is taken,
+# without discarding a description the user set themselves.
+record_color() {
+  local vm=$1 color=$2 desc
+  desc=$(vm_field "$vm" Description)
+  case $desc in
+    *vmclone:color=*) return 0 ;;
+    "") desc="vmclone:color=$color" ;;
+    *)  desc=$(printf '%s\nvmclone:color=%s' "$desc" "$color") ;;
+  esac
+  prlctl set "$vm" --description "$desc" >/dev/null
+}
+
 case "${1:-}" in
 add|new)
-       [ $# -ge 2 ] || die "usage: vmclone add <tag> [prlctl set options]"
+       [ $# -ge 2 ] || die "usage: vmclone add <tag> [--color RRGGBB] [prlctl set options]"
        require_golden
        tag=$2
        vm="$PREFIX-$tag"
@@ -147,12 +294,32 @@ add|new)
        # shellcheck disable=SC2086
        set -- $VMSET "$@"
        set +f
-       for opt in "$@"; do
-         # Renaming the clone would hide it from `rm`, `ls` and snapshot GC.
-         if [ "$opt" = "--name" ]; then
-           die "refusing --name: clones must stay called $PREFIX-<tag>"
-         fi
+       # Pull vmclone's own --color back out of what gets forwarded, and refuse
+       # --name: renaming a clone would hide it from `rm`, `ls` and snapshot GC.
+       color=""
+       n=$#
+       while [ $n -gt 0 ]; do
+         opt=$1; shift; n=$(( n - 1 ))
+         case $opt in
+           --color)
+             # $n, not $#: kept options are rotated to the back, so only $n
+             # says how many arguments are still waiting to be looked at.
+             [ $n -ge 1 ] || die "--color needs a value, e.g. --color 3366cc"
+             color=$1; shift; n=$(( n - 1 )) ;;
+           --name)
+             die "refusing --name: clones must stay called $PREFIX-<tag>" ;;
+           *) set -- "$@" "$opt" ;;
+         esac
        done
+       if [ -n "$color" ]; then
+         color=$(printf '%s' "$color" | sed 's/^#//' | tr 'a-f' 'A-F')
+         case $color in
+           [0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]) ;;
+           *) die "--color takes six hex digits, e.g. 3366cc" ;;
+         esac
+       else
+         color=$(pick_color "$tag")
+       fi
 
        snap_id=$(resolve_snapshot)
        echo "vmclone: cloning $GOLDEN from snapshot '$(snap_name "$snap_id")'"
@@ -168,7 +335,22 @@ add|new)
            die "aborted: $vm was not started"
          fi
        fi
+       record_color "$vm" "$color" || warn "could not record the colour on $vm"
+       echo "vmclone: accent colour #$color"
+       # A clone that pauses itself when idle would freeze part-way through the
+       # colour step, so hold that off and put it back the way the golden has it.
+       idle_pause=$(pause_idle_of "$vm")
+       if [ "$idle_pause" = "on" ]; then
+         prlctl set "$vm" --pause-idle off >/dev/null
+       fi
        prlctl start "$vm"
+       if ! apply_color "$vm" "$color"; then
+         warn "could not paint $vm -- no Windows session yet? Retry once it is up:"
+         warn "  vmclone add is done; re-run it on a fresh clone, or set the accent by hand"
+       fi
+       if [ "$idle_pause" = "on" ]; then
+         prlctl set "$vm" --pause-idle on >/dev/null
+       fi
        gc_snapshots || warn "snapshot cleanup failed"
        # optional, costs one reboot: unique Windows hostname
        # prlctl exec "$vm" --current-user powershell -Command \
@@ -184,5 +366,5 @@ rm|del)
        gc_snapshots || warn "snapshot cleanup failed"
        ;;
 ls)    prlctl list -a -o name,status | grep -E "^($PREFIX|NAME)" ;;
-*)     echo "usage: vmclone {add <tag> [prlctl set options]|rm <tag>|ls}"; exit 1 ;;
+*)     echo "usage: vmclone {add <tag> [--color RRGGBB] [prlctl set options]|rm <tag>|ls}"; exit 1 ;;
 esac
