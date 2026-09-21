@@ -48,7 +48,7 @@ separate machine.
 | Subcommand | What it runs |
 |---|---|
 | `add` / `new` | resolves a snapshot (see below), then `prlctl clone $GOLDEN --name $PREFIX-<tag> --linked --id <snapshot-uuid>`, `prlctl set $PREFIX-<tag> $VMSET <your options>` if any were given, `prlctl start`, and finally paints the clone's Windows accent colour |
-| `rm` / `del` | `prlctl stop --kill` then `prlctl delete` |
+| `rm` / `del` | `prlctl stop --kill`, but only if the clone is running or paused, then `prlctl delete` |
 | `ls` | `prlctl list -a -o name,status`, filtered to `$PREFIX*` |
 
 ### Snapshots are handled for you

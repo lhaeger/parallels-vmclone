@@ -361,7 +361,12 @@ rm|del)
        require_golden
        vm="$PREFIX-$2"
        if ! vm_exists "$vm"; then die "no such VM: $vm"; fi
-       prlctl stop "$vm" --kill || true
+       # Only a powered-on VM can be stopped; prlctl complains loudly about the
+       # rest. A stopped or suspended clone is deleted as it stands. The
+       # `|| true` still covers a VM that goes down between the two calls.
+       case $(vm_field "$vm" State) in
+         running|paused) prlctl stop "$vm" --kill || true ;;
+       esac
        prlctl delete "$vm"
        gc_snapshots || warn "snapshot cleanup failed"
        ;;
